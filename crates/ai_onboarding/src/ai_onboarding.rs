@@ -16,7 +16,7 @@ pub use young_account_banner::YoungAccountBanner;
 use std::sync::Arc;
 
 use client::{Client, UserStore, zed_urls};
-use gpui::{AnyElement, Entity, IntoElement, ParentElement, TaskExt};
+use gpui::{AnyElement, Entity, IntoElement, ParentElement};
 use ui::{Divider, RegisterComponent, Tooltip, Vector, VectorName, prelude::*};
 
 #[derive(PartialEq)]
@@ -44,7 +44,6 @@ pub struct ZedAiOnboarding {
     pub plan: Option<Plan>,
     pub account_too_young: bool,
     pub continue_with_zed_ai: Arc<dyn Fn(&mut Window, &mut App)>,
-    pub sign_in: Arc<dyn Fn(&mut Window, &mut App)>,
     pub dismiss_onboarding: Option<Arc<dyn Fn(&mut Window, &mut App)>>,
 }
 
@@ -63,13 +62,6 @@ impl ZedAiOnboarding {
             plan: store.plan(),
             account_too_young: store.account_too_young(),
             continue_with_zed_ai,
-            sign_in: Arc::new(move |_window, cx| {
-                cx.spawn({
-                    let client = client.clone();
-                    async move |cx| client.sign_in_with_optional_connect(true, cx).await
-                })
-                .detach_and_log_err(cx);
-            }),
             dismiss_onboarding: None,
         }
     }
@@ -156,37 +148,6 @@ impl ZedAiOnboarding {
                 )
                 .into_any_element()
         })
-    }
-
-    fn render_sign_in_disclaimer(&self, _cx: &mut App) -> AnyElement {
-        let signing_in = matches!(self.sign_in_status, SignInStatus::SigningIn);
-
-        v_flex()
-            .w_full()
-            .relative()
-            .gap_1()
-            .child(Headline::new("Welcome to Zed AI"))
-            .child(
-                Label::new("Sign in to try GPT Luna. Your 14 days begin when you start the trial.")
-                    .color(Color::Muted)
-                    .mb_2(),
-            )
-            .child(PlanDefinitions.sign_in_upsell())
-            .child(
-                Button::new("sign_in", "Sign In to Try GPT Luna")
-                    .disabled(signing_in)
-                    .full_width()
-                    .style(ButtonStyle::Tinted(ui::TintColor::Accent))
-                    .on_click({
-                        let callback = self.sign_in.clone();
-                        move |_, window, cx| {
-                            telemetry::event!("Start Trial Clicked", state = "pre-sign-in");
-                            callback(window, cx)
-                        }
-                    }),
-            )
-            .children(self.render_dismiss_button())
-            .into_any_element()
     }
 
     fn render_free_plan_state(&self, cx: &mut App) -> AnyElement {
@@ -391,7 +352,7 @@ impl RenderOnce for ZedAiOnboarding {
                 Some(Plan::ZedStudent) => self.render_student_plan_state(cx),
             }
         } else {
-            self.render_sign_in_disclaimer(cx)
+            div().into_any_element()
         }
     }
 }
@@ -407,7 +368,7 @@ impl Component for ZedAiOnboarding {
 
     fn description() -> &'static str {
         "The onboarding surface shown to new agent panel users, \
-        guiding them through signing in to Zed and selecting a plan \
+        guiding authenticated users through selecting a plan \
         before they can start using the agent."
     }
 
@@ -428,7 +389,6 @@ impl Component for ZedAiOnboarding {
                             plan,
                             account_too_young,
                             continue_with_zed_ai: Arc::new(|_, _| {}),
-                            sign_in: Arc::new(|_, _| {}),
                             dismiss_onboarding: None,
                         }
                         .into_any_element(),

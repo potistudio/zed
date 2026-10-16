@@ -1,5 +1,5 @@
 use anyhow::Result;
-use client::{Client, UserStore, zed_urls};
+use client::{UserStore, zed_urls};
 use cloud_llm_client::UsageLimit;
 use codestral::{self, CodestralEditPredictionDelegate};
 use copilot::Status;
@@ -484,7 +484,7 @@ impl Render for EditPredictionButton {
                             let description = if !enabled {
                                 "Disabled For This File"
                             } else if zed_cloud_needs_sign_in {
-                                "Sign In Or Configure a Provider"
+                                "Configure a Provider"
                             } else if zed_cloud_has_no_active_subscription {
                                 "This organization has no active subscription"
                             } else if excluded_from_plan {
@@ -1183,22 +1183,6 @@ impl EditPredictionButton {
                             .into_any_element()
                     })
                     .separator()
-                    .entry("Sign In", None, |window, cx| {
-                        telemetry::event!(
-                            "Edit Prediction Menu Action",
-                            action = "sign_in",
-                            provider = "zed",
-                        );
-                        let client = Client::global(cx);
-                        window
-                            .spawn(cx, async move |cx| {
-                                client
-                                    .sign_in_with_optional_connect(true, &cx)
-                                    .await
-                                    .log_err();
-                            })
-                            .detach();
-                    })
                     .link_with_handler(
                         "Learn More",
                         OpenBrowser {

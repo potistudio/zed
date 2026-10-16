@@ -191,20 +191,6 @@ impl State {
         self.status.is_signed_out() || self.user_store.read(cx).current_user().is_none()
     }
 
-    fn sign_in(&self, cx: &mut Context<Self>) -> Task<Result<()>> {
-        let client = self.client.clone();
-        let mut current_user = self.user_store.read(cx).watch_current_user();
-        cx.spawn(async move |state, cx| {
-            client.sign_in_with_optional_connect(true, cx).await?;
-            while current_user.borrow().is_none() {
-                current_user.next().await;
-            }
-            state.update(cx, |_, cx| {
-                cx.notify();
-            })
-        })
-    }
-
     fn refresh_models(&mut self, cx: &mut Context<Self>) {
         self.provider.update(cx, |provider, cx| {
             provider.refresh_models(cx).detach_and_log_err(cx);
@@ -479,7 +465,6 @@ struct ZedAiConfiguration {
     eligible_for_trial: bool,
     account_too_young: bool,
     compact: bool,
-    sign_in_callback: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -494,7 +479,6 @@ pub mod test_support {
             eligible_for_trial: false,
             account_too_young: true,
             compact: true,
-            sign_in_callback: Arc::new(|_, _| {}),
         }
         .into_any_element()
     }
@@ -507,7 +491,7 @@ fn zed_ai_description(
     eligible_for_trial: bool,
 ) -> &'static str {
     if !is_connected {
-        return "Sign in to have access to Zed's complete agentic experience with hosted models.";
+        return "Zed AI requires an authenticated account. Configure an API-key provider instead.";
     }
 
     match plan {
@@ -586,20 +570,7 @@ impl RenderOnce for ZedAiConfiguration {
         if !self.is_connected {
             return v_flex()
                 .gap_2()
-                .when(!self.compact, |this| this.child(Label::new(description)))
-                .child(
-                    Button::new("sign_in", "Sign In to use Zed AI")
-                        .start_icon(
-                            Icon::new(IconName::Github)
-                                .size(IconSize::Small)
-                                .color(Color::Muted),
-                        )
-                        .when(!self.compact, |this| this.full_width())
-                        .on_click({
-                            let callback = self.sign_in_callback.clone();
-                            move |_, window, cx| (callback)(window, cx)
-                        }),
-                );
+                .when(!self.compact, |this| this.child(Label::new(description)));
         }
 
         v_flex()
@@ -629,25 +600,11 @@ impl RenderOnce for ZedAiConfiguration {
 struct ConfigurationView {
     state: Entity<State>,
     compact: bool,
-    sign_in_callback: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>,
 }
 
 impl ConfigurationView {
     fn new(state: Entity<State>, compact: bool) -> Self {
-        let sign_in_callback = Arc::new({
-            let state = state.clone();
-            move |_window: &mut Window, cx: &mut App| {
-                state.update(cx, |state, cx| {
-                    state.sign_in(cx).detach_and_log_err(cx);
-                });
-            }
-        });
-
-        Self {
-            state,
-            compact,
-            sign_in_callback,
-        }
+        Self { state, compact }
     }
 }
 
@@ -667,7 +624,6 @@ impl Render for ConfigurationView {
             eligible_for_trial: user_store.trial_started_at().is_none(),
             account_too_young: user_store.account_too_young(),
             compact: self.compact,
-            sign_in_callback: self.sign_in_callback.clone(),
         }
     }
 }
@@ -1027,7 +983,6 @@ impl Component for ZedAiConfiguration {
                 eligible_for_trial: config.eligible_for_trial,
                 account_too_young: false,
                 compact: false,
-                sign_in_callback: Arc::new(|_, _| {}),
             }
             .into_any_element()
         };
