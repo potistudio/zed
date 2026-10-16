@@ -111,7 +111,6 @@ impl Render for EditPredictionButton {
                             .on_click(cx.listener(move |_, _, window, cx| {
                                 if let Some(workspace) = Workspace::for_window(window, cx) {
                                     workspace.update(cx, |workspace, cx| {
-                                        let copilot = copilot.clone();
                                         workspace.show_toast(
                                             Toast::new(
                                                 NotificationId::unique::<CopilotErrorToast>(),
@@ -119,16 +118,6 @@ impl Render for EditPredictionButton {
                                                     "Copilot Edit Predictions can't be started: {}",
                                                     e
                                                 ),
-                                            )
-                                            .on_click(
-                                                "Reinstall Copilot Edit Predictions",
-                                                move |window, cx| {
-                                                    copilot_ui::reinstall_and_sign_in(
-                                                        copilot.clone(),
-                                                        window,
-                                                        cx,
-                                                    )
-                                                },
                                             ),
                                             cx,
                                         );
@@ -705,40 +694,18 @@ impl EditPredictionButton {
         cx: &mut Context<Self>,
     ) -> Entity<ContextMenu> {
         let fs = self.fs.clone();
-        let project = self.project.clone();
         ContextMenu::build(window, cx, |menu, _, cx| {
-            let menu = menu
-                .entry(
-                    "Sign In to Copilot Edit Predictions",
-                    None,
-                    move |window, cx| {
-                        telemetry::event!(
-                            "Edit Prediction Menu Action",
-                            action = "sign_in",
-                            provider = "copilot",
-                        );
-                        if let Some(copilot) =
-                            EditPredictionStore::try_global(cx).and_then(|store| {
-                                store.update(cx, |this, cx| {
-                                    this.start_copilot_for_project(&project.upgrade()?, cx)
-                                })
-                            })
-                        {
-                            copilot_ui::initiate_sign_in(copilot, window, cx);
-                        }
-                    },
-                )
-                .entry("Disable Copilot Edit Predictions", None, {
-                    let fs = fs.clone();
-                    move |_window, cx| {
-                        telemetry::event!(
-                            "Edit Prediction Menu Action",
-                            action = "disable_provider",
-                            provider = "copilot",
-                        );
-                        hide_copilot(fs.clone(), cx)
-                    }
-                });
+            let menu = menu.entry("Disable Copilot Edit Predictions", None, {
+                let fs = fs.clone();
+                move |_window, cx| {
+                    telemetry::event!(
+                        "Edit Prediction Menu Action",
+                        action = "disable_provider",
+                        provider = "copilot",
+                    );
+                    hide_copilot(fs.clone(), cx)
+                }
+            });
 
             let menu =
                 self.add_provider_switching_section(menu, EditPredictionProvider::Copilot, cx);

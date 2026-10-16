@@ -16,7 +16,7 @@ use ui::{ConfiguredApiCard, prelude::*};
 use x_ai_subscribed::{PROVIDER_ID, PROVIDER_NAME, State, SuperGrokModel, language_model};
 
 const SUBSCRIPTION_DESCRIPTION: &str =
-    "Sign in with your SuperGrok subscription to use Grok models in Zed's agent.";
+    "Use an authenticated SuperGrok subscription to access Grok models.";
 
 pub struct XAiSubscribedProvider {
     state: Entity<State>,
@@ -150,13 +150,13 @@ impl LanguageModelProvider for XAiSubscribedProvider {
 
     fn authentication_error_message(&self) -> SharedString {
         "Your SuperGrok session is invalid or has expired. \
-        Sign in again via Settings > AI > LLM Providers to continue."
+        Sign-in is unavailable. Configure an API-key provider instead."
             .into()
     }
 
     fn missing_credentials_error_message(&self) -> SharedString {
         "You are not signed in to SuperGrok. \
-        Sign in via Settings > AI > LLM Providers to continue."
+        Configure an API-key provider in Settings > AI > LLM Providers instead."
             .into()
     }
 }
@@ -210,44 +210,15 @@ impl Render for ConfigurationView {
                 .into_any_element();
         }
 
-        let last_auth_error = state.last_auth_error();
-        let provider_state = self.state.clone();
-        let is_signing_in = state.is_signing_in();
-        let button_label = if is_signing_in {
-            "Signing in…"
-        } else {
-            "Sign In"
-        };
-
         v_flex()
             .gap_2()
             .when(!self.compact, |this| {
                 this.child(Label::new(SUBSCRIPTION_DESCRIPTION))
             })
             .child(
-                Button::new("sign-in", button_label)
-                    .when(!self.compact, |this| this.full_width())
-                    .style(ButtonStyle::Outlined)
-                    .size(ButtonSize::Medium)
-                    .loading(is_signing_in)
-                    .disabled(is_signing_in)
-                    .on_click(move |_, _window, cx| {
-                        provider_state.update(cx, |state, cx| state.sign_in(cx));
-                    }),
+                Label::new("Sign-in is unavailable. Configure an API-key provider instead.")
+                    .color(Color::Muted),
             )
-            .when_some(last_auth_error, |this, error| {
-                this.child(
-                    h_flex()
-                        .gap_1()
-                        .justify_center()
-                        .child(
-                            Icon::new(IconName::XCircle)
-                                .color(Color::Error)
-                                .size(IconSize::Small),
-                        )
-                        .child(Label::new(error).color(Color::Muted)),
-                )
-            })
             .into_any_element()
     }
 }

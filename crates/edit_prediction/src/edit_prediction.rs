@@ -3666,9 +3666,10 @@ pub fn init(cx: &mut App) {
             })
         }
 
-        workspace.register_action(|workspace, _: &Reinstall, window, cx| {
+        workspace.register_action(|workspace, _: &Reinstall, _window, cx| {
             if let Some(copilot) = copilot_for_project(workspace.project(), cx) {
-                copilot_ui::reinstall_and_sign_in(copilot, window, cx);
+                let reinstall = copilot.update(cx, |copilot, cx| copilot.reinstall(cx));
+                cx.spawn(async move |_, _| reinstall.await).detach();
             }
         });
     })

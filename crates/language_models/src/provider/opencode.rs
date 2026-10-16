@@ -1342,7 +1342,7 @@ impl Render for ConfigurationView {
                 List::new()
                     .child(
                         ListBulletItem::new("")
-                            .child(Label::new("Sign in and get your key at").color(Color::Muted))
+                            .child(Label::new("Get your API key at").color(Color::Muted))
                             .child(ButtonLink::new(
                                 "OpenCode Console",
                                 "https://opencode.ai/auth",

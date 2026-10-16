@@ -7,10 +7,7 @@ use gpui::AppContext;
 use language::language_settings::AllLanguageSettings;
 use project::DisableAiSettings;
 use settings::SettingsStore;
-pub use sign_in::{
-    ConfigurationMode, ConfigurationView, CopilotCodeVerification, initiate_sign_in,
-    initiate_sign_out, reinstall_and_sign_in,
-};
+pub use sign_in::{ConfigurationMode, ConfigurationView, initiate_sign_out};
 use ui::App;
 use workspace::AppState;
 
