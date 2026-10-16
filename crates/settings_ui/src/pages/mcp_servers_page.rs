@@ -425,42 +425,26 @@ fn render_status_details(
                     .into_any_element(),
             )
         }
-        ContextServerStatus::AuthRequired => {
-            let store = store.clone();
-            let context_server_id = context_server_id.clone();
-            Some(
-                feedback_base()
-                    .child(
-                        h_flex()
-                            .min_w_0()
-                            .w_full()
-                            .gap_2()
-                            .child(
-                                Icon::new(IconName::Info)
-                                    .size(IconSize::XSmall)
-                                    .color(Color::Muted),
-                            )
-                            .child(
-                                Label::new("Authenticate to connect this server")
-                                    .color(Color::Muted)
-                                    .size(LabelSize::Small),
-                            ),
-                    )
-                    .child(
-                        Button::new("authenticate-server", "Authenticate")
-                            .style(ButtonStyle::Outlined)
-                            .label_size(LabelSize::Small)
-                            .on_click({
-                                move |_event, _window, cx| {
-                                    store.update(cx, |s, cx| {
-                                        s.authenticate_server(&context_server_id, cx).log_err();
-                                    });
-                                }
-                            }),
-                    )
-                    .into_any_element(),
-            )
-        }
+        ContextServerStatus::AuthRequired => Some(
+            feedback_base()
+                .child(
+                    h_flex()
+                        .min_w_0()
+                        .w_full()
+                        .gap_2()
+                        .child(
+                            Icon::new(IconName::Info)
+                                .size(IconSize::XSmall)
+                                .color(Color::Muted),
+                        )
+                        .child(
+                            Label::new("Sign-in is unavailable for this server")
+                                .color(Color::Muted)
+                                .size(LabelSize::Small),
+                        ),
+                )
+                .into_any_element(),
+        ),
         ContextServerStatus::ClientSecretRequired { .. } => Some(
             feedback_base()
                 .child(
@@ -474,7 +458,7 @@ fn render_status_details(
                                 .color(Color::Muted),
                         )
                         .child(
-                            Label::new("A client secret is required to connect this server")
+                            Label::new("Sign-in is unavailable for this server")
                                 .color(Color::Muted)
                                 .size(LabelSize::Small),
                         ),

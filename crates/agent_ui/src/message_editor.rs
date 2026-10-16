@@ -58,11 +58,13 @@ impl SessionCapabilities {
         available_commands: Vec<acp_v2::AvailableCommand>,
         available_skills: Vec<AvailableSkill>,
     ) -> Self {
-        Self {
+        let mut capabilities = Self {
             prompt_capabilities,
-            available_commands,
+            available_commands: Vec::new(),
             available_skills,
-        }
+        };
+        capabilities.set_available_commands(available_commands);
+        capabilities
     }
 
     pub fn from_acp_commands(
@@ -136,7 +138,11 @@ impl SessionCapabilities {
         self.prompt_capabilities = prompt_capabilities;
     }
 
-    pub fn set_available_commands(&mut self, available_commands: Vec<acp_v2::AvailableCommand>) {
+    pub fn set_available_commands(
+        &mut self,
+        mut available_commands: Vec<acp_v2::AvailableCommand>,
+    ) {
+        available_commands.retain(|command| command.name != "login");
         self.available_commands = available_commands;
     }
 
@@ -2331,6 +2337,36 @@ mod tests {
             Mention, MessageEditor, MessageEditorEvent, SessionCapabilities, parse_mention_links,
         },
     };
+
+    #[test]
+    fn test_session_capabilities_exclude_login_commands() {
+        let commands = || {
+            vec![
+                acp_v2::AvailableCommand::new("login", "Sign in"),
+                acp_v2::AvailableCommand::new("help", "Get help"),
+            ]
+        };
+        let mut capabilities = SessionCapabilities::from_acp_commands(
+            acp_v2::PromptCapabilities::default(),
+            commands(),
+        );
+        assert_eq!(capabilities.available_commands().len(), 1);
+        assert!(
+            capabilities
+                .completion_commands()
+                .iter()
+                .all(|command| command.name != "login")
+        );
+
+        capabilities.set_available_commands(commands());
+        assert_eq!(capabilities.available_commands().len(), 1);
+        assert!(
+            capabilities
+                .available_commands()
+                .iter()
+                .all(|command| command.name == "help")
+        );
+    }
 
     #[test]
     fn test_session_capabilities_keep_commands_and_skills_separate() {

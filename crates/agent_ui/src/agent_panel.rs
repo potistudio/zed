@@ -25,9 +25,9 @@ use serde::{Deserialize, Serialize};
 use zed_actions::{
     DecreaseBufferFontSize, IncreaseBufferFontSize, ResetBufferFontSize,
     agent::{
-        AddSelectionToThread, ConflictContent, LogoutAgent, OpenSettings, ReauthenticateAgent,
-        ResetAgentZoom, ResetOnboarding, ResolveConflictedFilesWithAgent,
-        ResolveConflictsWithAgent, ReviewBranchDiff, SelectAgent,
+        AddSelectionToThread, ConflictContent, LogoutAgent, OpenSettings, ResetAgentZoom,
+        ResetOnboarding, ResolveConflictedFilesWithAgent, ResolveConflictsWithAgent,
+        ReviewBranchDiff, SelectAgent,
     },
     assistant::{
         FocusAgent, ManageSkills, OpenGlobalAgentsMdRules, OpenProjectAgentsMdRules, Toggle,
@@ -5669,12 +5669,6 @@ impl AgentPanel {
             conversation_view.read(cx).has_user_submitted_prompt(cx)
         });
 
-        let has_auth_methods = match &self.base_view {
-            BaseView::AgentThread { conversation_view } => {
-                conversation_view.read(cx).has_auth_methods()
-            }
-            _ => false,
-        };
         let supports_logout = self
             .active_conversation_view()
             .is_some_and(|conversation_view| conversation_view.read(cx).supports_logout());
@@ -5834,14 +5828,8 @@ impl AgentPanel {
                             .separator()
                             .action("Toggle Threads Sidebar", Box::new(ToggleWorkspaceSidebar));
 
-                        if has_auth_methods || supports_logout {
-                            menu = menu.separator()
-                        }
-                        if has_auth_methods {
-                            menu = menu.action("Reauthenticate", Box::new(ReauthenticateAgent))
-                        }
                         if supports_logout {
-                            menu = menu.action("Log Out", Box::new(LogoutAgent))
+                            menu = menu.separator().action("Log Out", Box::new(LogoutAgent))
                         }
 
                         if let Some(conversation_view) = conversation_view.as_ref() {
@@ -6642,13 +6630,6 @@ impl Render for AgentPanel {
             .on_action(cx.listener(Self::reset_font_size))
             .on_action(cx.listener(Self::toggle_zoom))
             .on_action(cx.listener(Self::toggle_terminal_thread_search))
-            .on_action(cx.listener(|this, _: &ReauthenticateAgent, window, cx| {
-                if let Some(conversation_view) = this.active_conversation_view() {
-                    conversation_view.update(cx, |conversation_view, cx| {
-                        conversation_view.reauthenticate(window, cx)
-                    })
-                }
-            }))
             .on_action(cx.listener(|this, _: &LogoutAgent, window, cx| {
                 if let Some(conversation_view) = this.active_conversation_view() {
                     conversation_view.update(cx, |conversation_view, cx| {

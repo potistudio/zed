@@ -10,9 +10,9 @@ use acp_thread::{AgentConnection, Plan};
 use action_log::{ActionLog, ActionLogTelemetry, DiffStats};
 use agent::{NativeAgentServer, NoModelConfiguredError, ThreadStore};
 use agent_client_protocol::schema::v2 as acp_v2;
+use agent_servers::AgentServer;
 #[cfg(test)]
 use agent_servers::AgentServerDelegate;
-use agent_servers::{AgentServer, GEMINI_TERMINAL_AUTH_METHOD_ID};
 use agent_settings::{AgentProfileId, AgentSettings};
 use anyhow::{Result, anyhow};
 #[cfg(feature = "audio")]
@@ -26,7 +26,6 @@ use editor::{
 };
 use file_icons::FileIcons;
 use fs::Fs;
-use futures::FutureExt as _;
 use gpui::{
     Action, Animation, AnimationExt, App, ClickEvent, ClipboardItem, CursorStyle, ElementId, Empty,
     Entity, EventEmitter, FocusHandle, Focusable, Hsla, ListOffset, ListState, ObjectFit,
@@ -950,7 +949,6 @@ enum AuthState {
     Ok,
     Unauthenticated {
         description: Option<Entity<Markdown>>,
-        pending_auth_method: Option<acp_v2::AuthMethodId>,
     },
 }
 
@@ -1660,10 +1658,7 @@ impl ConversationView {
             let description = err
                 .description
                 .map(|desc| cx.new(|cx| Markdown::new(desc.into(), None, None, cx)));
-            let auth_state = AuthState::Unauthenticated {
-                pending_auth_method: None,
-                description,
-            };
+            let auth_state = AuthState::Unauthenticated { description };
             if let Some(connected) = this.as_connected_mut() {
                 connected.auth_state = auth_state;
                 cx.emit(StateChange);
@@ -2226,151 +2221,6 @@ impl ConversationView {
         }));
     }
 
-    fn authenticate(
-        &mut self,
-        method: acp_v2::AuthMethodId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(workspace) = self.workspace.upgrade() else {
-            return;
-        };
-        let Some(connected) = self.as_connected_mut() else {
-            return;
-        };
-        let connection = connected.connection.clone();
-        if !connection.auth_methods().iter().any(|advertised| {
-            advertised.method_id() == &method && acp_thread::auth_methods::is_supported(advertised)
-        }) {
-            return;
-        }
-
-        let AuthState::Unauthenticated {
-            pending_auth_method,
-            ..
-        } = &mut connected.auth_state
-        else {
-            return;
-        };
-
-        let agent_telemetry_id = connection.telemetry_id();
-
-        if let Some(login_task) = connection.terminal_auth_task(&method, cx) {
-            pending_auth_method.replace(method.clone());
-
-            let project = self.project.clone();
-            cx.emit(StateChange);
-            cx.notify();
-            self.auth_task = Some(cx.spawn_in(window, {
-                async move |this, cx| {
-                    let result = async {
-                        let login = login_task.await?;
-                        this.update_in(cx, |_this, window, cx| {
-                            Self::spawn_external_agent_login(
-                                login,
-                                workspace,
-                                project,
-                                method.clone(),
-                                false,
-                                window,
-                                cx,
-                            )
-                        })?
-                        .await
-                    }
-                    .await;
-
-                    match &result {
-                        Ok(_) => telemetry::event!(
-                            "Authenticate Agent Succeeded",
-                            agent = agent_telemetry_id
-                        ),
-                        Err(_) => {
-                            telemetry::event!(
-                                "Authenticate Agent Failed",
-                                agent = agent_telemetry_id,
-                            )
-                        }
-                    }
-
-                    this.update_in(cx, |this, window, cx| {
-                        if let Err(err) = result {
-                            this.cancel_request_elicitations(cx);
-                            if let Some(ConnectedServerState {
-                                auth_state:
-                                    AuthState::Unauthenticated {
-                                        pending_auth_method,
-                                        ..
-                                    },
-                                ..
-                            }) = this.as_connected_mut()
-                            {
-                                pending_auth_method.take();
-                                cx.emit(StateChange);
-                            }
-                            if let Some(active) = this.root_thread_view() {
-                                active.update(cx, |active, cx| {
-                                    active.handle_thread_error(err, cx);
-                                })
-                            }
-                        } else {
-                            this.reset(window, cx);
-                        }
-                        this.auth_task.take()
-                    })
-                    .ok();
-                }
-            }));
-            return;
-        }
-
-        pending_auth_method.replace(method.clone());
-
-        let authenticate = connection.authenticate(method, cx);
-        cx.emit(StateChange);
-        cx.notify();
-        self.auth_task = Some(cx.spawn_in(window, {
-            async move |this, cx| {
-                let result = authenticate.await;
-
-                match &result {
-                    Ok(_) => telemetry::event!(
-                        "Authenticate Agent Succeeded",
-                        agent = agent_telemetry_id
-                    ),
-                    Err(_) => {
-                        telemetry::event!("Authenticate Agent Failed", agent = agent_telemetry_id,)
-                    }
-                }
-
-                this.update_in(cx, |this, window, cx| {
-                    if let Err(err) = result {
-                        this.cancel_request_elicitations(cx);
-                        if let Some(ConnectedServerState {
-                            auth_state:
-                                AuthState::Unauthenticated {
-                                    pending_auth_method,
-                                    ..
-                                },
-                            ..
-                        }) = this.as_connected_mut()
-                        {
-                            pending_auth_method.take();
-                            cx.emit(StateChange);
-                        }
-                        if let Some(active) = this.root_thread_view() {
-                            active.update(cx, |active, cx| active.handle_thread_error(err, cx));
-                        }
-                    } else {
-                        this.reset(window, cx);
-                    }
-                    this.auth_task.take()
-                })
-                .ok();
-            }
-        }));
-    }
-
     fn load_subagent_session(
         &mut self,
         subagent_id: acp_v2::SessionId,
@@ -2430,133 +2280,6 @@ impl ConversationView {
         .detach();
     }
 
-    fn spawn_external_agent_login(
-        login: task::SpawnInTerminal,
-        workspace: Entity<Workspace>,
-        project: Entity<Project>,
-        method: acp_v2::AuthMethodId,
-        previous_attempt: bool,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Task<Result<()>> {
-        let Some(terminal_panel) = workspace.read(cx).panel::<TerminalPanel>(cx) else {
-            return Task::ready(Err(anyhow!("Terminal panel is unavailable")));
-        };
-
-        window.spawn(cx, async move |cx| {
-            let mut task = login.clone();
-            if let Some(cmd) = &task.command {
-                // Have "node" command use Zed's managed Node runtime by default
-                if cmd == "node" {
-                    let resolved_node_runtime = project.update(cx, |project, cx| {
-                        let agent_server_store = project.agent_server_store().clone();
-                        agent_server_store.update(cx, |store, cx| {
-                            store.node_runtime().map(|node_runtime| {
-                                cx.background_spawn(async move { node_runtime.binary_path().await })
-                            })
-                        })
-                    });
-
-                    if let Some(resolve_task) = resolved_node_runtime {
-                        if let Ok(node_path) = resolve_task.await {
-                            task.command = Some(node_path.to_string_lossy().to_string());
-                        }
-                    }
-                }
-            }
-            task.shell = task::Shell::WithArguments {
-                program: task.command.take().expect("login command should be set"),
-                args: std::mem::take(&mut task.args),
-                title_override: None,
-            };
-
-            let terminal = terminal_panel
-                .update_in(cx, |terminal_panel, window, cx| {
-                    terminal_panel.spawn_task(&task, window, cx)
-                })?
-                .await?;
-
-            let success_patterns = match method.0.as_ref() {
-                "claude-login" | GEMINI_TERMINAL_AUTH_METHOD_ID => vec![
-                    "Login successful".to_string(),
-                    "Type your message".to_string(),
-                ],
-                _ => Vec::new(),
-            };
-            if success_patterns.is_empty() {
-                // No success patterns specified: wait for the process to exit and check exit code
-                let exit_status = terminal
-                    .read_with(cx, |terminal, cx| terminal.wait_for_completed_task(cx))?
-                    .await;
-
-                match exit_status {
-                    Some(status) if status.success() => Ok(()),
-                    Some(status) => Err(anyhow!(
-                        "Login command failed with exit code: {:?}",
-                        status.code()
-                    )),
-                    None => Err(anyhow!("Login command terminated without exit status")),
-                }
-            } else {
-                // Look for specific output patterns to detect successful login
-                let mut exit_status = terminal
-                    .read_with(cx, |terminal, cx| terminal.wait_for_completed_task(cx))?
-                    .fuse();
-
-                let logged_in = cx
-                    .spawn({
-                        let terminal = terminal.clone();
-                        async move |cx| {
-                            loop {
-                                cx.background_executor().timer(Duration::from_secs(1)).await;
-                                let content =
-                                    terminal.update(cx, |terminal, _cx| terminal.get_content())?;
-                                if success_patterns
-                                    .iter()
-                                    .any(|pattern| content.contains(pattern))
-                                {
-                                    return anyhow::Ok(());
-                                }
-                            }
-                        }
-                    })
-                    .fuse();
-                futures::pin_mut!(logged_in);
-                futures::select_biased! {
-                    result = logged_in => {
-                        if let Err(e) = result {
-                            log::error!("{e}");
-                            return Err(anyhow!("exited before logging in"));
-                        }
-                    }
-                    _ = exit_status => {
-                        if !previous_attempt
-                            && project.read_with(cx, |project, _| project.is_via_remote_server())
-                            && method.0.as_ref() == GEMINI_TERMINAL_AUTH_METHOD_ID
-                        {
-                            return cx
-                                .update(|window, cx| {
-                                    Self::spawn_external_agent_login(
-                                        login,
-                                        workspace,
-                                        project.clone(),
-                                        method,
-                                        true,
-                                        window,
-                                        cx,
-                                    )
-                                })?
-                                .await;
-                        }
-                        return Err(anyhow!("exited before logging in"));
-                    }
-                }
-                terminal.update(cx, |terminal, _| terminal.kill_active_task())?;
-                Ok(())
-            }
-        })
-    }
-
     pub fn has_user_submitted_prompt(&self, cx: &App) -> bool {
         self.root_thread_view().is_some_and(|active| {
             active
@@ -2571,105 +2294,26 @@ impl ConversationView {
 
     fn render_auth_required_state(
         &self,
-        connection: &Rc<dyn AgentConnection>,
         description: Option<&Entity<Markdown>>,
-        pending_auth_method: Option<&acp_v2::AuthMethodId>,
-        window: &mut Window,
         cx: &Context<Self>,
     ) -> impl IntoElement {
-        let auth_methods = connection
-            .auth_methods()
-            .iter()
-            .filter(|method| acp_thread::auth_methods::is_supported(method))
-            .collect::<Vec<_>>();
-
-        let agent_display_name = self
-            .agent_server_store
-            .read(cx)
-            .agent_display_name(&self.agent.agent_id())
-            .unwrap_or_else(|| self.agent.agent_id().0);
-
-        let show_fallback_description =
-            auth_methods.len() > 1 && description.is_none() && pending_auth_method.is_none();
-
-        let auth_buttons = || {
-            h_flex().justify_end().flex_wrap().gap_1().children(
-                auth_methods.iter().enumerate().rev().map(|(ix, method)| {
-                    let (method_id, name) = (method.method_id().clone(), method.name().to_string());
-                    let agent_telemetry_id = connection.telemetry_id();
-
-                    Button::new(method_id.0.clone(), name)
-                        .label_size(LabelSize::Small)
-                        .map(|this| {
-                            if ix == 0 {
-                                this.style(ButtonStyle::Tinted(TintColor::Accent))
-                            } else {
-                                this.style(ButtonStyle::Outlined)
-                            }
-                        })
-                        .when_some(method.description(), |this, description| {
-                            this.tooltip(Tooltip::text(description.to_string()))
-                        })
-                        .on_click({
-                            cx.listener(move |this, _, window, cx| {
-                                telemetry::event!(
-                                    "Authenticate Agent Started",
-                                    agent = agent_telemetry_id,
-                                    method = method_id.0
-                                );
-
-                                this.authenticate(method_id.clone(), window, cx)
-                            })
-                        })
-                }),
-            )
-        };
-
-        if pending_auth_method.is_some() {
-            return Callout::new()
-                .icon(IconName::Info)
-                .title(format!("Authenticating to {}…", agent_display_name))
-                .actions_slot(
-                    Icon::new(IconName::ArrowCircle)
-                        .size(IconSize::Small)
-                        .color(Color::Muted)
-                        .with_rotate_animation(2)
-                        .into_any_element(),
-                )
-                .into_any_element();
-        }
-
         Callout::new()
             .icon(IconName::Info)
-            .title(format!("Authenticate to {}", agent_display_name))
-            .when(auth_methods.len() == 1, |this| {
-                this.actions_slot(auth_buttons())
-            })
+            .title("Authentication Required")
             .description_slot(
                 v_flex()
-                    .text_ui(cx)
-                    .map(|this| {
-                        if show_fallback_description {
-                            this.child(
-                                Label::new("Choose one of the following authentication options:")
-                                    .size(LabelSize::Small)
-                                    .color(Color::Muted),
-                            )
-                        } else {
-                            this.children(description.map(|desc| {
-                                self.render_markdown(
-                                    desc.clone(),
-                                    MarkdownStyle::themed(MarkdownFont::Agent, window, cx),
-                                    cx,
-                                )
-                            }))
-                        }
-                    })
-                    .when(auth_methods.len() > 1, |this| {
-                        this.gap_1().child(auth_buttons())
-                    }),
+                    .children(
+                        description.map(|description| Label::new(description.read(cx).source())),
+                    )
+                    .child(Label::new(
+                        "Sign-in is unavailable. Configure an API-key provider instead.",
+                    )),
             )
-            .into_any_element()
+            .map(|callout| {
+                div()
+                    .debug_selector(|| "sign-in-unavailable".into())
+                    .child(callout)
+            })
     }
 
     fn sync_request_elicitation_states(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3139,21 +2783,6 @@ impl ConversationView {
             .thread(self.root_session_id.as_ref()?, cx)
     }
 
-    fn render_markdown(
-        &self,
-        markdown: Entity<Markdown>,
-        style: MarkdownStyle,
-        cx: &App,
-    ) -> MarkdownElement {
-        render_agent_markdown(
-            markdown,
-            style,
-            &self.workspace,
-            &self.code_span_resolver,
-            cx,
-        )
-    }
-
     fn notify_with_sound(
         &mut self,
         caption: impl Into<SharedString>,
@@ -3559,21 +3188,6 @@ impl ConversationView {
         CopyButton::new("copy-error-message", message).tooltip_label("Copy Error Message")
     }
 
-    pub(crate) fn reauthenticate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.cancel_request_elicitations(cx);
-        if let Some(active) = self.root_thread_view() {
-            active.update(cx, |active, cx| active.clear_thread_error(cx));
-        }
-        let this = cx.weak_entity();
-        let Some(connection) = self.as_connected().map(|c| c.connection.clone()) else {
-            debug_panic!("This should not be possible");
-            return;
-        };
-        window.defer(cx, |window, cx| {
-            Self::handle_auth_required(this, AuthRequired::new(), connection, window, cx);
-        })
-    }
-
     pub(crate) fn logout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.supports_logout() {
             return;
@@ -3600,10 +3214,7 @@ impl ConversationView {
                     } else {
                         this.cancel_request_elicitations(cx);
                         if let Some(connected) = this.as_connected_mut() {
-                            connected.auth_state = AuthState::Unauthenticated {
-                                description: None,
-                                pending_auth_method: None,
-                            };
+                            connected.auth_state = AuthState::Unauthenticated { description: None };
                             cx.emit(StateChange);
                             if let Some(view) = connected.active_view()
                                 && view
@@ -3747,24 +3358,13 @@ impl Render for ConversationView {
                 .child(self.render_load_error(e, window, cx))
                 .into_any(),
             ServerState::Connected(ConnectedServerState {
-                connection,
-                auth_state:
-                    AuthState::Unauthenticated {
-                        description,
-                        pending_auth_method,
-                    },
+                auth_state: AuthState::Unauthenticated { description },
                 ..
             }) => v_flex()
                 .flex_1()
                 .size_full()
                 .justify_end()
-                .child(self.render_auth_required_state(
-                    connection,
-                    description.as_ref(),
-                    pending_auth_method.as_ref(),
-                    window,
-                    cx,
-                ))
+                .child(self.render_auth_required_state(description.as_ref(), cx))
                 .into_any_element(),
             ServerState::Connected(connected) => {
                 if let Some(view) = connected.active_view() {
@@ -4969,6 +4569,30 @@ pub(crate) mod tests {
     }
 
     #[gpui::test]
+    async fn test_login_command_is_unavailable(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (conversation_view, cx) =
+            setup_conversation_view(StubAgentServer::default_response(), cx).await;
+        let thread_view = active_thread(&conversation_view, cx);
+        let message_editor = message_editor(&conversation_view, cx);
+
+        message_editor.update_in(cx, |editor, window, cx| {
+            editor.set_text("/login", window, cx)
+        });
+        thread_view.update_in(cx, |view, window, cx| view.send(window, cx));
+        cx.run_until_parked();
+
+        assert_eq!(
+            message_editor.read_with(cx, |editor, cx| editor.text(cx)),
+            "/login"
+        );
+        thread_view.read_with(cx, |view, cx| {
+            assert!(view.thread_error.is_some());
+            assert!(view.thread.read(cx).entries().is_empty());
+        });
+    }
+
+    #[gpui::test]
     async fn test_authentication_keeps_receipt_submission_recoverable(cx: &mut TestAppContext) {
         init_test(cx);
         let connection = StubAgentConnection::new().with_receipt_submissions(true);
@@ -4999,14 +4623,11 @@ pub(crate) mod tests {
             ));
         });
 
-        let authenticate = cx
-            .debug_bounds("authenticate-submission")
-            .expect("authentication recovery button");
-        cx.simulate_click(authenticate.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert_eq!(
-            message_editor.read_with(cx, |editor, cx| editor.text(cx)),
-            "retain this prompt",
+        assert!(cx.debug_bounds("authenticate-submission").is_none());
+        assert!(
+            message_editor
+                .read_with(cx, |editor, cx| editor.text(cx))
+                .is_empty()
         );
         thread.read_with(cx, |thread, _| {
             let original = thread.submission(submission_id).expect("retained original");
@@ -6845,6 +6466,11 @@ pub(crate) mod tests {
         let (conversation_view, cx) =
             setup_conversation_view(StubAgentServer::new(connection.clone()), cx).await;
 
+        add_to_workspace(conversation_view.clone(), cx);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("sign-in-unavailable").is_some());
+        assert!(connection.authenticate_calls.lock().is_empty());
+
         // When new_session returns AuthRequired, the server should transition
         // to Connected + Unauthenticated rather than getting stuck in Loading.
         conversation_view.read_with(cx, |view, cx| {
@@ -6898,11 +6524,7 @@ pub(crate) mod tests {
                     acp_v2::AuthMethodId::new(AuthGatedAgentConnection::TERMINAL_AUTH_METHOD_ID),
                 ]
             );
-            let AuthState::Unauthenticated {
-                description,
-                pending_auth_method,
-            } = &connected.auth_state
-            else {
+            let AuthState::Unauthenticated { description } = &connected.auth_state else {
                 panic!("Auth state should be Unauthenticated");
             };
             assert_eq!(
@@ -6913,7 +6535,6 @@ pub(crate) mod tests {
                     .source(),
                 "Sign in to continue"
             );
-            assert!(pending_auth_method.is_none());
             assert!(
                 !view.supports_logout(),
                 "Logout should be hidden while unauthenticated"
@@ -6959,66 +6580,17 @@ pub(crate) mod tests {
             assert!(view.has_pending_selections());
         });
 
-        for method_id in [
-            AuthGatedAgentConnection::OTHER_AUTH_METHOD_ID,
-            "unadvertised:login",
-        ] {
-            conversation_view.update_in(cx, |view, window, cx| {
-                view.authenticate(acp_v2::AuthMethodId::new(method_id), window, cx);
-                assert!(view.auth_task.is_none());
-                assert!(matches!(
-                    &view
-                        .as_connected()
-                        .expect("connection must remain")
-                        .auth_state,
-                    AuthState::Unauthenticated {
-                        pending_auth_method: None,
-                        ..
-                    }
-                ));
-            });
-        }
-        cx.run_until_parked();
         assert!(connection.authenticate_calls.lock().is_empty());
         assert!(connection.terminal_auth_calls.lock().is_empty());
         assert!(!*connection.authenticated.lock());
-        conversation_view.read_with(cx, |view, _cx| {
-            assert!(view.active_thread().is_none());
-            assert!(view.has_pending_selections());
-        });
 
-        // Authenticate using the real authenticate flow on ConnectionView.
-        // This calls connection.authenticate(), which flips the internal flag,
-        // then on success triggers reset() -> new_session() which now succeeds.
+        *connection.authenticated.lock() = true;
         conversation_view.update_in(cx, |view, window, cx| {
-            let method_id = acp_v2::AuthMethodId::new(AuthGatedAgentConnection::AUTH_METHOD_ID);
-            view.authenticate(method_id.clone(), window, cx);
-            let AuthState::Unauthenticated {
-                pending_auth_method,
-                ..
-            } = &view
-                .as_connected()
-                .expect("connection must remain")
-                .auth_state
-            else {
-                panic!("authentication should be pending before reset");
-            };
-            assert_eq!(pending_auth_method.as_ref(), Some(&method_id));
-            assert!(view.auth_task.is_some());
+            view.retry_connection(window, cx);
         });
         cx.run_until_parked();
-        assert_eq!(
-            *connection.authenticate_calls.lock(),
-            vec![acp_v2::AuthMethodId::new(
-                AuthGatedAgentConnection::AUTH_METHOD_ID
-            )]
-        );
-        assert_eq!(
-            *connection.terminal_auth_calls.lock(),
-            vec![acp_v2::AuthMethodId::new(
-                AuthGatedAgentConnection::AUTH_METHOD_ID
-            )]
-        );
+        assert!(connection.authenticate_calls.lock().is_empty());
+        assert!(connection.terminal_auth_calls.lock().is_empty());
 
         // After auth, the server should have an active thread in the Ok state.
         conversation_view.read_with(cx, |view, cx| {
@@ -7114,7 +6686,7 @@ pub(crate) mod tests {
             connection.auth_methods = auth_methods;
             let (conversation_view, cx) =
                 setup_conversation_view(StubAgentServer::new(connection.clone()), cx).await;
-            conversation_view.update_in(cx, |view, window, cx| {
+            conversation_view.update_in(cx, |view, _, _| {
                 assert!(!view.has_auth_methods());
                 assert!(!view.supports_logout());
                 assert_eq!(
@@ -7124,21 +6696,13 @@ pub(crate) mod tests {
                         .auth_methods(),
                     connection.auth_methods()
                 );
-                view.authenticate(
-                    acp_v2::AuthMethodId::new(AuthGatedAgentConnection::OTHER_AUTH_METHOD_ID),
-                    window,
-                    cx,
-                );
                 assert!(view.auth_task.is_none());
                 assert!(matches!(
                     &view
                         .as_connected()
                         .expect("connection must remain")
                         .auth_state,
-                    AuthState::Unauthenticated {
-                        pending_auth_method: None,
-                        ..
-                    }
+                    AuthState::Unauthenticated { .. }
                 ));
             });
             cx.run_until_parked();

@@ -424,7 +424,6 @@ pub struct ConfigureContextServerModal {
     state: State,
     original_server_id: Option<ContextServerId>,
     scroll_handle: ScrollHandle,
-    secret_editor: Entity<Editor>,
     _auth_subscription: Option<Subscription>,
 }
 
@@ -559,16 +558,6 @@ impl ConfigureContextServerModal {
                         cx,
                     ),
                     scroll_handle: ScrollHandle::new(),
-                    secret_editor: cx.new(|cx| {
-                        let mut editor = Editor::single_line(window, cx);
-                        editor.set_placeholder_text(
-                            "Enter client secret (leave empty for public clients)",
-                            window,
-                            cx,
-                        );
-                        editor.set_masked(true, cx);
-                        editor
-                    }),
                     _auth_subscription: None,
                 })
             })
@@ -677,68 +666,6 @@ impl ConfigureContextServerModal {
             store.stop_server(server_id, cx).log_err();
         });
         self.state = State::Idle;
-        cx.notify();
-    }
-
-    fn authenticate(&mut self, server_id: ContextServerId, cx: &mut Context<Self>) {
-        self.context_server_store.update(cx, |store, cx| {
-            store.authenticate_server(&server_id, cx).log_err();
-        });
-        self.await_auth_outcome(server_id, cx);
-    }
-
-    fn submit_client_secret(&mut self, server_id: ContextServerId, cx: &mut Context<Self>) {
-        let secret = self.secret_editor.read(cx).text(cx);
-        self.context_server_store.update(cx, |store, cx| {
-            store.submit_client_secret(&server_id, secret, cx).log_err();
-        });
-        self.await_auth_outcome(server_id, cx);
-    }
-
-    fn await_auth_outcome(&mut self, server_id: ContextServerId, cx: &mut Context<Self>) {
-        self.state = State::Authenticating {
-            server_id: server_id.clone(),
-        };
-
-        self._auth_subscription = Some(cx.subscribe(
-            &self.context_server_store,
-            move |this, _, event: &ServerStatusChangedEvent, cx| {
-                if event.server_id != server_id {
-                    return;
-                }
-                match &event.status {
-                    ContextServerStatus::Running => {
-                        this._auth_subscription = None;
-                        this.state = State::Idle;
-                        this.show_configured_context_server_toast(event.server_id.clone(), cx);
-                        cx.emit(DismissEvent);
-                    }
-                    ContextServerStatus::AuthRequired => {
-                        this._auth_subscription = None;
-                        this.state = State::AuthRequired {
-                            server_id: event.server_id.clone(),
-                        };
-                        cx.notify();
-                    }
-                    ContextServerStatus::ClientSecretRequired { error } => {
-                        this._auth_subscription = None;
-                        this.state = State::ClientSecretRequired {
-                            server_id: event.server_id.clone(),
-                            error: error.clone().map(SharedString::from),
-                        };
-                        cx.notify();
-                    }
-                    ContextServerStatus::Error(error) => {
-                        this._auth_subscription = None;
-                        this.set_error(error.clone(), cx);
-                    }
-                    ContextServerStatus::Authenticating
-                    | ContextServerStatus::Starting
-                    | ContextServerStatus::Stopped => {}
-                }
-            },
-        ));
-
         cx.notify();
     }
 
@@ -952,7 +879,7 @@ impl ConfigureContextServerModal {
             .child(Label::new(label).size(LabelSize::Small).color(Color::Muted))
     }
 
-    fn render_auth_required(&self, server_id: &ContextServerId, cx: &mut Context<Self>) -> Div {
+    fn render_auth_required(&self, _server_id: &ContextServerId, _cx: &mut Context<Self>) -> Div {
         h_flex()
             .h_8()
             .min_w_0()
@@ -968,95 +895,20 @@ impl ConfigureContextServerModal {
                             .color(Color::Muted),
                     )
                     .child(
-                        Label::new("Authenticate to connect this server")
+                        Label::new("Sign-in is unavailable for this server")
                             .size(LabelSize::Small)
                             .color(Color::Muted),
                     ),
-            )
-            .child(
-                Button::new("authenticate-server", "Authenticate")
-                    .style(ButtonStyle::Outlined)
-                    .label_size(LabelSize::Small)
-                    .on_click({
-                        let server_id = server_id.clone();
-                        cx.listener(move |this, _event, _window, cx| {
-                            this.authenticate(server_id.clone(), cx);
-                        })
-                    }),
             )
     }
 
     fn render_client_secret_required(
         &self,
         server_id: &ContextServerId,
-        error: Option<SharedString>,
+        _error: Option<SharedString>,
         cx: &mut Context<Self>,
     ) -> Div {
-        let settings = ThemeSettings::get_global(cx);
-        let text_style = TextStyle {
-            color: cx.theme().colors().text,
-            font_family: settings.buffer_font.family.clone(),
-            font_fallbacks: settings.buffer_font.fallbacks.clone(),
-            font_size: settings.buffer_font_size(cx).into(),
-            font_weight: settings.buffer_font.weight,
-            line_height: relative(settings.buffer_line_height.value()),
-            ..Default::default()
-        };
-
-        v_flex()
-            .w_full()
-            .gap_2()
-            .when_some(error, |this, error| {
-                this.child(Self::render_modal_error(error))
-            })
-            .child(
-                h_flex()
-                    .gap_1p5()
-                    .child(
-                        Icon::new(IconName::Info)
-                            .size(IconSize::Small)
-                            .color(Color::Muted),
-                    )
-                    .child(
-                        Label::new(
-                            "Enter your OAuth client secret, or leave empty for public clients",
-                        )
-                        .size(LabelSize::Small)
-                        .color(Color::Muted),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .w_full()
-                    .gap_2()
-                    .capture_action({
-                        let server_id = server_id.clone();
-                        cx.listener(move |this, _: &editor::actions::Newline, _window, cx| {
-                            this.submit_client_secret(server_id.clone(), cx);
-                        })
-                    })
-                    .child(div().flex_1().child(EditorElement::new(
-                        &self.secret_editor,
-                        EditorStyle {
-                            background: cx.theme().colors().editor_background,
-                            local_player: cx.theme().players().local(),
-                            text: text_style,
-                            syntax: cx.theme().syntax().clone(),
-                            ..Default::default()
-                        },
-                    )))
-                    .child(
-                        Button::new("submit-client-secret", "Submit")
-                            .style(ButtonStyle::Outlined)
-                            .label_size(LabelSize::Small)
-                            .on_click({
-                                let server_id = server_id.clone();
-                                cx.listener(move |this, _event, _window, cx| {
-                                    this.submit_client_secret(server_id.clone(), cx);
-                                })
-                            }),
-                    ),
-            )
+        self.render_auth_required(server_id, cx)
     }
 
     fn render_authenticating(&self, server_id: &ContextServerId, cx: &mut Context<Self>) -> Div {

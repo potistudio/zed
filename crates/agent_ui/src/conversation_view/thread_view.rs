@@ -1551,6 +1551,7 @@ impl ThreadView {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn in_flight_prompt(&self, cx: &App) -> Option<Arc<[acp_v2::ContentBlock]>> {
         let record = self.thread.read(cx);
         let record = record.submission(self.current_submission?)?;
@@ -1834,7 +1835,11 @@ impl ThreadView {
 
         let text = message_editor.read(cx).text(cx);
         let text = text.trim();
-        if text == "/login" || text == "/logout" {
+        if text == "/login" || text.starts_with("/login ") {
+            self.handle_thread_error(anyhow!("Sign-in is unavailable."), cx);
+            return;
+        }
+        if text == "/logout" {
             let connection = thread.read(cx).connection().clone();
             let can_login = connection
                 .auth_methods()
@@ -11991,12 +11996,7 @@ impl ThreadView {
             .title("Authentication Required")
             .icon(IconName::XCircle)
             .description(error.clone())
-            .actions_slot(
-                h_flex()
-                    .gap_0p5()
-                    .child(self.authenticate_button(cx))
-                    .child(self.create_copy_button(error)),
-            )
+            .actions_slot(self.create_copy_button(error))
             .dismiss_action(self.dismiss_error_button(cx))
     }
 
@@ -12189,68 +12189,6 @@ impl ThreadView {
                     cx.open_url(&zed_urls::upgrade_to_zed_pro_url(cx));
                 }
             }))
-    }
-
-    fn authenticate_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        Button::new("authenticate", "Authenticate")
-            .label_size(LabelSize::Small)
-            .style(ButtonStyle::Filled)
-            .on_click(cx.listener({
-                move |this, _, window, cx| {
-                    let server_view = this.server_view.clone();
-
-                    this.clear_thread_error(cx);
-                    if let Some(message) = this.in_flight_prompt(cx) {
-                        if !message.iter().all(acp_thread::content::can_convert_to_v1)
-                            || this.message_editor.read(cx).editor().read(cx).read_only(cx)
-                        {
-                            this.handle_thread_error(
-                                anyhow!(
-                                    "This saved submission cannot be restored into the composer. The original submission and draft have been kept."
-                                ),
-                                cx,
-                            );
-                            return;
-                        }
-                        if !this.thread.read(cx).uses_reported_activity()
-                            && let Some(submission_id) = this.current_submission
-                            && this.thread.read(cx).submission(submission_id).is_some_and(
-                                |record| {
-                                    matches!(
-                                        record.state,
-                                        SubmissionState::Completed
-                                            | SubmissionState::Failed(_)
-                                            | SubmissionState::Cancelled
-                                    )
-                                },
-                            )
-                        {
-                            this.thread.update(cx, |thread, cx| {
-                                thread.forget_submission(submission_id, cx);
-                            });
-                            this.current_submission = None;
-                        }
-                        this.message_editor.update(cx, |editor, cx| {
-                            editor.set_message(message.to_vec(), window, cx);
-                        });
-                    }
-                    let connection = this.thread.read(cx).connection().clone();
-                    window.defer(cx, |window, cx| {
-                        ConversationView::handle_auth_required(
-                            server_view,
-                            AuthRequired::new(),
-                            connection,
-                            window,
-                            cx,
-                        );
-                    })
-                }
-            }))
-            .map(|button| {
-                div()
-                    .debug_selector(|| "authenticate-submission".into())
-                    .child(button)
-            })
     }
 
     fn current_model_name(&self, cx: &App) -> SharedString {
