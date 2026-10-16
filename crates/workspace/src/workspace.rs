@@ -10036,6 +10036,7 @@ impl Render for Workspace {
                                         .into_any_element(),
                                 };
                                 let overlay = div()
+                                    .debug_selector(|| "zoomed_overlay".into())
                                     .occlude()
                                     .absolute()
                                     .overflow_hidden()
@@ -10052,7 +10053,7 @@ impl Render for Workspace {
                                 Some(match self.zoomed_position {
                                     Some(DockPosition::Left) => overlay.right_2().border_r_1(),
                                     Some(DockPosition::Right) => overlay.left_2().border_l_1(),
-                                    Some(DockPosition::Bottom) => overlay.top_2().border_t_1(),
+                                    Some(DockPosition::Bottom) => overlay.border_t_1(),
                                     None => {
                                         overlay.top_2().bottom_2().left_2().right_2().border_1()
                                     }
@@ -15735,6 +15736,43 @@ mod tests {
             (None, None),
             "a zoomed dock should not receive centered layout padding"
         );
+    }
+
+    #[gpui::test]
+    async fn test_zoomed_bottom_dock_has_no_top_gap(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, None, cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+
+        let panel = workspace.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| TestPanel::new(DockPosition::Bottom, 100, cx));
+            workspace.add_panel(panel.clone(), window, cx);
+            workspace.toggle_dock(DockPosition::Bottom, window, cx);
+            panel
+        });
+        cx.run_until_parked();
+
+        panel.update(cx, |_, cx| cx.emit(PanelEvent::ZoomIn));
+
+        for zoomed_padding in [true, false] {
+            cx.update_global(|store: &mut SettingsStore, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.zoomed_padding = Some(zoomed_padding);
+                });
+            });
+            cx.run_until_parked();
+
+            let overlay = cx
+                .debug_bounds("zoomed_overlay")
+                .expect("the zoomed dock should render an overlay");
+            workspace.read_with(cx, |workspace, _| {
+                assert_eq!(workspace.zoomed_position, Some(DockPosition::Bottom));
+                assert_eq!(overlay.top(), workspace.bounds.top());
+                assert_eq!(overlay.size, workspace.bounds.size);
+            });
+        }
     }
 
     fn zoomed_padding_bounds(
